@@ -1,0 +1,726 @@
+---
+title: "SWATH_clean"
+author: "Elliot"
+date: "07/05/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=12, fig.height=8, fig.path='figs/')
+set.seed(8)
+
+## Load packages
+library(AnnotationDbi)
+library(pathview)
+library(BiocManager)
+library(biomaRt)
+library(broom.mixed)
+library(clusterProfiler)
+library(data.table)
+library(dplyr)
+library(DOSE)
+library(EnhancedVolcano)
+library(enrichplot)
+library(ggcorrplot)
+library(ggfortify)
+library(RColorBrewer)
+library(mice)
+library(mixOmics)
+library(plyr)
+library(ReactomePA)
+library(readxl)
+library(rWikiPathways)
+library(SWATH2stats)
+library(tidyr)
+library(org.Hs.eg.db)
+library(org.Ss.eg.db)
+library(VIM)
+
+
+# Source functions
+source(file = "src/myfunctions.R")
+```
+
+## SWATH analysis of piglet data
+
+This is an R Markdown document containing the data wrangling, data exploration and quantification of SWATH data collected from piglet brains. The tissue samples used to generate this data contains grey and white matter derived from parasagital region of the frontal cortex. Sample preparation can be found in the manuscripts folder of this project. Briefely, sample preparation consisted of cell lysis, alkylation with acrylamide, digestion with Tripsin and desalting using amonium nitrate. Each brain sample was run through an ABSIEX5600 triple TOF machine in duplicate to ensure measurment reprodicubillity. There are 3 experimental groups in this study:
+
+    1) 8-day old healthy piglet (CONTROL)
+    2) Hypoxic-ischameic brain injured piglet treated with hypotherimia and stem cell vehicle (HI+HTH+PBS)
+    3) Hypoxic-ischeamic brain injured piglet treated with hypothermia and stem cell therapy (HI+HTH+SC)
+    
+    
+Firstly, I would like to identify the major sources of variation in my data and identify whether such sources of variation correspond to biological conditions, or experimental bias. I would like to visualize trends or patterns between samples, whether they ‘naturally’ cluster according to known biological conditions.
+
+```{r Data import , include = FALSE}
+## This code block formats the data into two separate formats. One for use in mixomics. 
+
+
+#import data
+h_data <- read_excel("data/Processed_Human_SWATH06-03-2020.xlsx", sheet = "Area - proteins")
+
+glimpse(h_data)
+```
+
+```{r Wrangling of Human data,include=FALSE}
+UniProt.id <- h_data[,1] # Data frame containing Uniprot protein ids 
+
+###Need to compile a list for mixomics
+#list with 
+# protein.levels contains the response intensity for all measured proteins
+h.protein.levels <- as.data.frame(t(h_data[,2:33]))
+
+colnames(h.protein.levels) <- UniProt.id$Protein # Name the columns according to their protein ID
+
+Removed_proteins <- colnames(h.protein.levels)[colSums(is.na(h.protein.levels)) > 0]# Save a list of removed proteins in case they may be identified as important
+
+h.protein.levels <- h.protein.levels[colSums(is.na(h.protein.levels)) == 0] # Removal of the na's 
+#Na.s represented a very small proportion of the data and so were omitted
+
+# mean.protein levels contains the average response intensity of the for each piglet sample
+h.mean.protein.levels <-  as.data.frame(t(h_data[,34:49]))
+colnames(h.mean.protein.levels) <- UniProt.id$Protein
+sum(is.na(h.mean.protein.levels))# There are 104 proteins not measured in all pigs
+
+h.mean.protein.levels <- h.mean.protein.levels[colSums(is.na(h.mean.protein.levels)) == 0] # In the event that the a protein was detected in one sample but not the other. The single values is counted as the mean
+
+#cns.h.mean.protein.levels.matrix <- as.matrix(cns.mean.protein.levels)
+# Data frame protein responses per brain x = 6991 proteins y = 32 brains 
+
+# Clinic.values contains relevant clinical information
+clinic.values <- read_excel("data/Copy of HI+SC_Piglet_master_file.xlsx")
+clinic.values<- clinic.values%>%
+  filter(Proteomics == TRUE)%>%
+  filter(Pig != 2370)%>%
+  mutate(Date = factor(Date))
+
+# Treatment information refers to their grouping.
+treatment.information <- tibble::rownames_to_column(h.protein.levels)
+
+treatment.information <- treatment.information%>%
+  dplyr::select(`rowname`)%>%
+  mutate(Brain = factor(`rowname`))%>%
+  mutate(Treatment = ifelse(grepl("2335|2343|2351|2367|2380|2407", x = treatment.information$`rowname`), "HI+HTH+SC",
+                            ifelse(grepl("2334|2344|2350|2368|2374", x = treatment.information$`rowname`), "HI+HTH+PBS", "CONTROL")))%>%
+  mutate(Treatment = factor(Treatment))
+
+#Compile the multiple data frames into a single list
+H.Data <- list(UniProt.id, treatment.information, clinic.values, h.mean.protein.levels)
+```
+
+
+## Data exploration
+In this section we will check for the presences of possible confounding variables using the mixomics package. 
+
+From the literature we know that there are multiple factors both environmental and inherited that can influence susceptibility of neonates to global HI injury other than our treatment.
+
+To begin, will investigate the effect of:
+1) Sex: Males have a higher incidence of negative outcome following HI injury
+2) Litter: This combines both genetic and developmental environment in which there are many factors
+3) Hypotensive time: This is analogous to ischemia exposure.
+
+
+```{r Data qualitiy check}
+# Creation of a matrix for PCA computation 
+h.protein.levels.matrix <- as.matrix(h.protein.levels)
+h.mean.protein.levels.matrix <- as.matrix(h.mean.protein.levels)
+
+#cns. is refers to data that has been centered and scaled.
+cns.h.protein.levels.matrix <- scale(h.protein.levels, center = TRUE)
+cns.h.mean.protein.levels.matrix <- scale(h.mean.protein.levels, center = TRUE)
+
+## Are the duplicate MSMS measurements highly correlated 
+CnS.PCA <- pca(cns.h.protein.levels.matrix)
+PCA_duplicates <- plotIndiv(CnS.PCA, title = "Duplicate runs on the ABSCIEX Triple TOF are highly correlated", caption = "The replicates are highly correlated and so can be averaged")
+
+print(PCA_duplicates)
+png("figs/Figure 1 PCA duplicates.png")
+```
+The plots demonstrate that each of the duplicate samples are highly correlated thus, for simplicity we will take the mean. All visualizations from here on will be derived from the mean response intensity.
+
+```{r Initial data visualisation}
+## Initial data visualization
+Ini.pca <- pca(cns.h.mean.protein.levels.matrix)
+plotIndiv(Ini.pca)
+plotVar(Ini.pca, cex = 2)
+```
+
+
+```{r Confounding factors, fig.height= 6, fig.width=6, fig.hold='hold', out.width="50%"}
+# Generate plots to show the effect of the confounding factor
+par(mfrow=c(1,2))
+
+Group_effect <- plotIndiv(Ini.pca, group = clinic.values$Group, legend = TRUE, title = "Group effect", legend.position = "top", cex = 5)
+Date_effect <- plotIndiv(Ini.pca, group = clinic.values$Date, legend = TRUE, title = "Date effect",  legend.position = "top", cex = 5)
+Sex_effect <- plotIndiv(Ini.pca, group = clinic.values$Sex, legend = TRUE, title = "Sex Effect",  legend.position = "top", cex = 5)
+
+print(Group_effect)
+print(Date_effect)
+print(Sex_effect)
+
+png("figs/Major sources of variation by PCA.png")
+
+#None of these factors appear to play a part in the clustering. Though Sex is debatable
+```
+
+It appears that the variables that we have selected are not major sources of variation in our dataset. 
+
+The second question like to ask is what are the key variables that contribute to the most variance in the data set.
+
+
+```{r What features contribute most to the variance }
+MyResult.spca <- spca(cns.h.mean.protein.levels.matrix, ncomp = 3, keepX = c(15,15,15))                 # 1 Run the method
+
+tune <- tune.pca(cns.h.mean.protein.levels.matrix) # tune function is used to produce a scree plot to find the optimum number of components.
+
+screeplot(tune) ## Scree plot shows elbow at PC2  
+
+plotIndiv(MyResult.spca, group = clinic.values$Group,   # 2 Plot the samples
+          legend = TRUE, title = 'Group effects, sPCA comp 1 - 2',
+          legend.title = 'Group')
+
+plotVar(MyResult.spca, cex = 3)
+
+selectVar(MyResult.spca, comp = 1)$value
+
+plotLoadings(MyResult.spca)
+
+selectVar(MyResult.spca, comp=2)$value
+plotLoadings(MyResult.spca, comp = 2)
+
+# Extract and save the largest predictors from the three principal components
+write.csv(MyResult.spca$loadings, "output/Principal component loadings - Human.csv")
+```
+
+Given the number of duplicates we will see the implications of removing the duplicate genes and seeing what other proteins are contributing to the variance.
+               
+```{r Visualisation of proteins}
+## Visualization of the global comparisons using heatmaps and dendrograms
+
+# heatmap with dendrogram reordering + expected ordering
+color_vector <- c("1","2","2","1","1","2","1","2","1","2","2","3","3","3","3","3")
+colMain <- colorRampPalette(brewer.pal(3, "Blues"))(25)
+hm <- heatmap(cns.h.mean.protein.levels.matrix, RowSideColors=color_vector)
+
+print(hm)
+
+png("figs/Global differences in protein expression.png")
+```
+
+Next we will ask the question: What specific proteins are different between the three sample groups. We will do this with analysis of variance (ANOVA) with Tukey's Honest significance test to show the between group differences.
+
+```{r Univariate testing for human data}
+#----------------------------------------------------------------------------------------------------------------------------------
+Group = as.factor(t(clinic.values$Group)) # groups you are comparing
+
+Data <- as.matrix(h_data[,34:49])
+rownames(Data) <- h_data$Protein
+ Data <- na.omit(Data)
+# we test one variable at a time, extracting the pvalues
+aovmod = apply(Data, 1, function(x) {aov(x ~ Group)})
+
+#extract the p-values for each ANOVA
+pvalaov = sapply(aovmod, function(x) {summary(x)[[1]][["Pr(>F)"]][1]})
+
+# Number of DE 
+sum(pvalaov <= 0.05)
+
+# Adjust for multiple testing  
+pvalaov_adj = p.adjust(pvalaov,method = 'fdr')
+sum(pvalaov_adj <= 0.05)
+
+
+#--------------------------- If you have more than two Groups ------------------------------------
+# perform posthoc Tukey test
+postTurSHD =t(lapply(aovmod, function(x){TukeyHSD(x)$'Group'[, "p adj"]}))
+
+# extract adjust p value for each pair
+postTurSHD_Table = data.frame(matrix(unlist(postTurSHD,use.names = TRUE), nrow=nrow(Data), byrow=T))
+
+# set renames
+rownames(postTurSHD_Table) = names(aovmod)
+
+# set colnames names
+colnames(postTurSHD_Table) =names(postTurSHD[[1]]) # this looks at the first variable and extracts the pairwise comparisons
+
+HI_HTH_PBS_CONTROL.sig <- row.names(postTurSHD_Table)[which(postTurSHD_Table$`HI+HTH+PBS-CONTROL`<=0.05)]
+HI_HTH_SC_CONTROL.sig <- row.names(postTurSHD_Table)[which(postTurSHD_Table$`HI+HTH+SC-CONTROL`<=0.05)]
+HI_HTH_SC_HI_HTH_PBS.sig <- row.names(postTurSHD_Table)[which(postTurSHD_Table$`HI+HTH+SC-HI+HTH+PBS`<=0.05)]
+
+print(HI_HTH_PBS_CONTROL.sig)
+print(HI_HTH_SC_CONTROL.sig)
+print(HI_HTH_SC_HI_HTH_PBS.sig)
+
+
+write.csv(HI_HTH_PBS_CONTROL.sig, "output/Significantly altered proteins HI-HTH-PBS vs CONTROL.csv")
+write.csv(HI_HTH_SC_CONTROL.sig, "output/Significantly altered proteins HI-HTH-SC vs CONTROL.csv")
+write.csv(HI_HTH_SC_HI_HTH_PBS.sig, "output/Significantly altered proteins HI-HTH-SC vs HI-HTH-PBS.csv")
+```
+```{r Treat HI groups as the same for human data}
+#----------------------------------------------------------------------------------------------------------------------------------
+Group = as.factor(t(clinic.values$Treatment)) # groups you are comparing
+
+Data <- as.matrix(h_data[,34:49])
+rownames(Data) <- h_data$Protein
+ Data <- na.omit(Data)
+# we test one variable at a time, extracting the pvalues
+aov = apply(Data, 1, function(x) {aov(x ~ Group)})
+
+#extract the p-values for each ANOVA
+pvalaov = sapply(aovmod, function(x) {summary(x)[[1]][["Pr(>F)"]][1]})
+
+# Number of DE 
+sum(pvalaov <= 0.05)
+
+# Adjust for multiple testing  
+pvalaov_adj = p.adjust(pvalaov,method = 'fdr')
+sum(pvalaov_adj <= 0.05)
+
+write.csv(pvalaov_adj, "output/Significantly altered proteins HI vs CONTROL.csv")
+```
+
+
+```{r Human Volcano plots}
+# Data wrangling into a format suitable for volcano plots
+
+
+
+```
+
+
+```{r Human Pathway analysis with cluster profiler}
+# Data wrangling into a format suitable for cluster profiler
+
+con.vs.all <- read.csv("output/HI.vs.CONTROL.csv")%>%
+separate(`X`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
+  mutate(`p-value` = `x`)
+  #filter(`p-value`<0.05)#
+
+
+#prepare prot.list 
+## assume that 1st column is ID
+## 2nd column is fold change
+
+## feature 1: numeric vector
+Prot.list <- con.vs.all %>%
+  dplyr::select(`UniProt`, `Fold Change`,`p-value`)
+
+KEGGID <-  bitr_kegg(Prot.list$UniProt, fromType='uniprot', toType='kegg', organism='ssc')
+
+d <- merge(Prot.list, KEGGID, by = "Identifier", by.x = "UniProt",by.y = "uniprot")
+
+Prot.list <- as.matrix(d)
+
+```
+
+```{r Human KEGG analysis}
+# Data wrangling into a format suitable for cluster profiler
+
+con.vs.all <- read.csv("output/HI.vs.CONTROL.csv")%>%
+separate(`X`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
+  mutate(`p-value` = `x`)
+  #filter(`p-value`<0.05)#
+
+
+#prepare prot.list 
+## assume that 1st column is ID
+## 2nd column is fold change
+
+## feature 1: numeric vector
+Prot.list <- con.vs.all %>%
+  dplyr::select(`UniProt`, `Fold Change`,`p-value`)
+
+KEGGID <-  bitr_kegg(Prot.list$UniProt, fromType='uniprot', toType='kegg', organism='ssc')
+
+d <- merge(Prot.list, KEGGID, by = "Identifier", by.x = "UniProt",by.y = "uniprot")
+
+Prot.list <- as.matrix(d)
+
+```
+
+
+
+
+```{r Volcano plots from p-values previously collected from Marker view software, fig.height=12, fig.width=12}
+#Import the data
+Control_vs_ALL <- read_excel("data/Control vs ALL.xlsx")
+
+# Separate out the Peak Name column into the UniprotID and drop NAs
+Control_vs_ALL <- Control_vs_ALL %>%
+  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
+  drop_na()
+
+#Repeat above
+ControlvsHI_PBS <- read_excel("data/ControlvsHI+PBS.xlsx")
+ControlvsHI_PBS <- ControlvsHI_PBS %>%
+  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
+  drop_na()
+
+#Repeat above
+HI_SCvsHI_PBS <- read_excel("data/HI+SCvsHI+PBS.xlsx")
+HI_SCvsHI_PBS <- HI_SCvsHI_PBS %>%
+  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
+  drop_na()
+
+# ----------------------------------------------------------------
+# Visualize the Volcano plots using the enhanced volcano package from biconductor
+# ----------------------------------------------------------------
+  EnhancedVolcano(Control_vs_ALL,
+    lab = "UniProt",
+    x = 'Log (Fold Change)',
+    y = 'p-value',
+    xlim = c(-2, 2),
+    ylim = c(0, 2), 
+    title = "Control animals vs HI+HTH")
+
+
+ EnhancedVolcano(ControlvsHI_PBS,
+    lab = "UniProt",
+    x = 'Log (Fold Change)',
+    y = 'p-value',
+    xlim = c(-2, 2),
+    ylim = c(0, 2), 
+    title = "Control animals vs HI+HTH+PBS")
+
+ EnhancedVolcano(HI_SCvsHI_PBS,
+    lab = "UniProt",
+    x = 'Log (Fold Change)',
+    y = 'p-value',
+    xlim = c(-2, 2),
+    ylim = c(0, 2), 
+    title = "HI+HTH+SC vs HI+HTH+PBS")
+```
+
+In this next section we will conduct a detailed pathway analysis using the cluster profiller package to determine which pathways are up and down regulated. 
+
+```{r ClusterProfiler, include=FALSE}
+#Import the files containing pvalues
+## Data wrangling to obtain th KEGG identifiers
+Control_vs_ALL <- read_excel("data/Control vs ALL.xlsx")
+
+con.vs.all <- Control_vs_ALL %>%
+  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
+  filter(`p-value`<0.05)
+
+#str(con.vs.all)#write(con.vs.all$UniProt, "Con_vs_all_uniprot.csv")
+
+#ControlvsHI_PBS <- read_excel("ControlvsHI+PBS.xlsx")
+#con.vs.pbs <- ControlvsHI_PBS%>%
+#  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
+ # filter(`p-value`<0.05)
+
+#HI_SCvsHI_PBS <- read_excel("HI+SCvsHI+PBS.xlsx")
+#hi.vs.pbs <- HI_SCvsHI_PBS%>%
+  #separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
+  #filter(`p-value`<0.05)
+
+#UniProt <- Control_vs_ALL%>%
+#separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
+ # dplyr::select(UniProt)
+
+#_________________________________________
+
+#prepare prot.list 
+## assume that 1st column is ID
+## 2nd column is fold change
+
+## feature 1: numeric vector
+Prot.list <- con.vs.all %>%
+  dplyr::select(`UniProt`, `Fold Change`,`p-value`)
+
+KEGGID <-  bitr_kegg(Prot.list$UniProt, fromType='uniprot', toType='kegg', organism='ssc')
+
+d <- merge(Prot.list, KEGGID, by = "Identifier", by.x = "UniProt",by.y = "uniprot")
+
+Prot.list <- as.matrix(d)
+
+#Prot.list <- as.matrix(Prot.list[,2])
+## feature 2: named vector
+#rownames(Prot.list) <- as.character(d[,1])
+
+## feature 3: decreasing order
+#Prot.list <- sort(Prot.list, decreasing = TRUE)
+```
+
+
+
+```{r Pathway analysis section }
+#=================================================================================================
+## Pathway analysis data preparation
+# This contains the KEGG ids
+geneList <- d[,2]
+names(geneList) <- as.character(d[,4])
+geneList <- sort(geneList, decreasing = TRUE)
+
+gene <- names(geneList)[abs(geneList) > 1.1]
+ 
+```
+
+```{r KEGG Enrichment}
+#==================================================================================================
+# KEGG enrichment analysis
+KEGG.enrichment <- enrichKEGG(gene = gene,
+                keyType = "kegg",
+                 organism  = 'ssc',
+                 pvalueCutoff = 0.1)
+
+barplot(KEGG.enrichment, showCategory=20)
+dotplot(KEGG.enrichment, showCategory=20)
+
+## convert gene ID to Symbol
+
+gse <- gseKEGG(geneList     = geneList,
+                keyType = "kegg",
+               organism     = 'ssc',
+               nPerm        = 1000,
+               minGSSize    = 5,
+               pvalueCutoff = 0.2,
+               verbose      = FALSE)
+
+head(gse)
+
+enrich.mod <- enrichMKEGG(gene = gene,
+                keyType = "kegg",
+                 organism  = 'ssc',
+                 pvalueCutoff = 0.1)
+
+gse.mod<-  gseMKEGG(gene = geneList,
+                keyType = "kegg",
+                 organism  = 'ssc',
+                 pvalueCutoff = 0.5)
+
+
+
+```
+```{r wikipathway analysis}
+## Will not undertake wiki pathway analysis for because the sus scrofa data base is very small(161 bytes)
+
+
+
+
+edox <- setReadable(edo, 'org.Ss.eg.db', 'ENTREZID')
+p1 <- cnetplot(edox, foldChange=geneList)
+## categorySize can be scaled by 'pvalue' or 'geneNum'
+p2 <- cnetplot(edox, categorySize="pvalue", foldChange=geneList)
+p3 <- cnetplot(edox, foldChange=geneList, circular = TRUE, colorEdge = TRUE)
+cowplot::plot_grid(p1, p2, p3, ncol=3, labels=LETTERS[1:3], rel_widths=c(.8, .8, 1.2))
+
+
+
+```
+```{r GO analysis}
+## Will not undertake wiki pathway analysis for because the sus scrofa data base is very small(161 bytes)
+
+sample_test <- enrichGO(gene = gene, OrgDb = 'org.Ss.eg.db' , pvalueCutoff=1, qvalueCutoff=1)
+head(summary(sample_test))
+
+
+ego <- enrichGO(gene          = gene,
+                universe      = names(geneList),
+                OrgDb         = org.Ss.eg.db,
+                ont           = "CC",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+head(summary(ego))
+
+
+dotplot(ego, showCategory=10)
+
+enrichMap(ego, vertex.label.cex=1.2, layout=igraph::layout.kamada.kawai)
+cnetplot(ego, foldChange= geneList)
+
+plotGOgraph(ego)
+
+
+secc <- gseGO(geneList=geneList, ont="CC", OrgDb=org.Ss.eg.db, verbose=F)
+head(summary(gsecc))
+
+gseaplot(gsecc, geneSetID="GO:0000779")
+```
+
+```{r}
+#======================================================================================================
+#Disease enrichment analysis
+
+pig = useMart("ensembl", dataset = "sscrofa_gene_ensembl")
+
+BM_Annotations <- getBM(mart= pig, values= rownames(cns.h.mean.protein.levels.matrix), attributes= c("description","uniprot_gn_id","entrezgene_id","protein_id"))
+
+
+entrez <- merge(BM_Annotations, Prot.list, by = "Identifier", by.x = "uniprot_gn_id",by.y = "UniProt")
+
+entrez <- distinct(entrez)
+
+# Prepare the data for Disease ontology analysis
+geneList <- as.numeric(entrez[,5])
+names(geneList) <- as.character(entrez[,3])
+geneList <- sort(geneList, decreasing = TRUE)                                
+
+gene<- names(geneList)
+# Must be entrez IDs !!!!!!!!!!!!!!1
+x <- enrichDO(gene          = geneList,
+              ont           = "DO",
+              pvalueCutoff  = 0.2,
+              pAdjustMethod = "BH",
+              universe      = names(geneList),
+              minGSSize     = 1,
+              maxGSSize     = 500,
+              qvalueCutoff  = 0.1,
+              readable      = TRUE)
+
+```
+dgn <- enrichDGN(gene)
+
+head(x)
+
+y <- gseDO(geneList,
+           nPerm         = 100,
+           minGSSize     = 120,
+           pvalueCutoff  = 0.2,
+           pAdjustMethod = "BH",
+           verbose       = FALSE)
+head(y, 3)
+
+dgn <- gseDGN(geneList,
+              nPerm         = 100,
+              minGSSize     = 120,
+              pvalueCutoff  = 0.2,
+              pAdjustMethod = "BH",
+              verbose       = FALSE)
+dgn <- setReadable(dgn, 'org.Hs.eg.db')
+head(dgn, 3)
+
+
+#======================================================================================================
+#Gene Ontology analysis
+GO.data <- bitr_kegg(Prot.list, fromType = "uniprot", toType = "kegg", organism = "ssc")
+
+gene <- Prot.list[,1]
+
+ggo <- groupGO(gene     = gene,
+               keyType = "UNIPROT",
+               OrgDb    = org.Ss.eg.db,
+               ont      = "CC",
+               level    = 3,
+               readable = TRUE)
+
+gene.Go <- Prot.list[,1]
+
+ego <- enrichGO(gene          = gene.Go,
+                universe      = con.vs.all$UniProt,
+                keyType = "UNIPROT",
+                OrgDb         = org.Ss.eg.db,
+                ont           = "CC",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05,
+        readable      = TRUE)
+#======================================================================================================
+# Reactome Pathway analysis - not supported for the pig
+
+
+```{r MSigDb analysis}
+# This contains the KEGG ids
+geneList <- d[,2]
+names(geneList) <- as.character(d[,4])
+geneList <- sort(geneList, decreasing = TRUE)
+
+gene <- names(geneList)[abs(geneList) > 1.1]
+
+
+
+gmtfile <- system.file("extdata", "c5.cc.v5.0.entrez.gmt", package="clusterProfiler")
+c5 <- read.gmt(gmtfile)
+
+egmt <- enricher(gene = gene, TERM2GENE = c5,  gene,
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "BH",
+  minGSSize = 10,
+  maxGSSize = 500,
+  qvalueCutoff = 0.2,
+  TERM2GENE,
+  TERM2NAME = NA)
+head(egmt)
+
+```
+
+```{r Data visualisation}
+
+#p1 <- cnetplot(edox, foldChange=geneList)
+## categorySize can be scaled by 'pvalue' or 'geneNum'
+#p2 <- cnetplot(edox, categorySize="pvalue", foldChange=geneList)
+#p3 <- cnetplot(edox, foldChange=geneList, circular = TRUE, colorEdge = TRUE)
+#cowplot::plot_grid(p1, p2, p3, ncol=3, labels=LETTERS[1:3], rel_widths=c(.8, .8, 1.2))
+
+
+#p1 <- heatplot(edox)
+#p2 <- heatplot(edox, foldChange=geneList)
+#cowplot::plot_grid(p1, p2, ncol=1, labels=LETTERS[1:2])
+
+
+#p <- pmcplot(terms, 2010:2017)
+#p2 <- pmcplot(terms, 2010:2017, proportion=FALSE)
+#plot_grid(p, p2, ncol=2)
+
+browseKEGG(KEGG.enrichment, 'ssc05012') # INput KEGG pathway number to bring up an annotated pathway to view
+```
+
+
+
+
+```{r Volcano plots from p-values previously collected from Marker view software, fig.height=3, fig.width=3}
+#Import the data
+Control_vs_ALL <- read_excel("Control vs ALL.xlsx")
+
+# Separate out the Peak Name column into the UniprotID and drop NAs
+Control_vs_ALL <- Control_vs_ALL %>%
+  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
+  drop_na()
+
+#Repeat above
+ControlvsHI_PBS <- read_excel("ControlvsHI+PBS.xlsx")
+ControlvsHI_PBS <- ControlvsHI_PBS %>%
+  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
+  drop_na()
+
+#Repeat above
+HI_SCvsHI_PBS <- read_excel("HI+SCvsHI+PBS.xlsx")
+HI_SCvsHI_PBS <- HI_SCvsHI_PBS %>%
+  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
+  drop_na()
+
+# ----------------------------------------------------------------
+# Visualize the Volcano plots using the enhanced volcano package from biconductor
+# ----------------------------------------------------------------
+  EnhancedVolcano(Control_vs_ALL,
+    lab = "UniProt",
+    x = 'Log (Fold Change)',
+    y = 'p-value',
+    xlim = c(-2, 2),
+    ylim = c(0, 2), 
+    title = "Control animals vs HI+HTH")
+
+
+ EnhancedVolcano(ControlvsHI_PBS,
+    lab = "UniProt",
+    x = 'Log (Fold Change)',
+    y = 'p-value',
+    xlim = c(-2, 2),
+    ylim = c(0, 2), 
+    title = "Control animals vs HI+HTH+PBS")
+
+ EnhancedVolcano(HI_SCvsHI_PBS,
+    lab = "UniProt",
+    x = 'Log (Fold Change)',
+    y = 'p-value',
+    xlim = c(-2, 2),
+    ylim = c(0, 2), 
+    title = "HI+HTH+SC vs HI+HTH+PBS")
+```
+
+```{r Session Info}
+sessionInfo()
+
+warnings()
+```
