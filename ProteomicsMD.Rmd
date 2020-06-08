@@ -5,8 +5,8 @@ date: "07/05/2020"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(fig.width=12, fig.height=8, fig.path='figs/')
+```{r Setup and Package Loading, include=FALSE}
+knitr::opts_chunk$set(fig.width = 12, fig.height = 8, fig.path = "figs/")
 set.seed(8)
 
 ## Load packages
@@ -24,6 +24,9 @@ library(enrichplot)
 library(ggcorrplot)
 library(ggfortify)
 library(RColorBrewer)
+library(MeSH.Hsa.eg.db)
+library(MeSH.Ssc.eg.db)
+library(meshes)
 library(mice)
 library(mixOmics)
 library(plyr)
@@ -53,61 +56,86 @@ This is an R Markdown document containing the data wrangling, data exploration a
 Firstly, I would like to identify the major sources of variation in my data and identify whether such sources of variation correspond to biological conditions, or experimental bias. I would like to visualize trends or patterns between samples, whether they ‘naturally’ cluster according to known biological conditions.
 
 ```{r Data import , include = FALSE}
-## This code block formats the data into two separate formats. One for use in mixomics. 
+## This code block formats the data into two separate formats. One for use in mixomics.
 
-
-#import data
+# import data
 h_data <- read_excel("data/Processed_Human_SWATH06-03-2020.xlsx", sheet = "Area - proteins")
 
 glimpse(h_data)
 ```
 
-```{r Wrangling of Human data,include=FALSE}
-UniProt.id <- h_data[,1] # Data frame containing Uniprot protein ids 
+```{r Wrangling of Human data for mixomics ,include=FALSE}
+ # This chunk wrangles the data into a format compatible with analysis using the mixomics package.
+### Need to compile a list for mixomics according to the example in the mixomics vignette
+# list with: 
+#           Uniprot Ids
+#           Treatment Information
+#           Clinic values
+#           Protein levels
 
-###Need to compile a list for mixomics
-#list with 
+
+
+ # Create a data frame containing Uniprot protein ids
+UniProt.id <- h_data[, 1]
+
 # protein.levels contains the response intensity for all measured proteins
-h.protein.levels <- as.data.frame(t(h_data[,2:33]))
+h.protein.levels <- as.data.frame(t(h_data[, 2:33]))
 
 colnames(h.protein.levels) <- UniProt.id$Protein # Name the columns according to their protein ID
 
-Removed_proteins <- colnames(h.protein.levels)[colSums(is.na(h.protein.levels)) > 0]# Save a list of removed proteins in case they may be identified as important
+# Save a list of removed proteins in case they may be identified as important
+Removed_proteins <- colnames(h.protein.levels)[colSums(is.na(h.protein.levels)) > 0]
 
-h.protein.levels <- h.protein.levels[colSums(is.na(h.protein.levels)) == 0] # Removal of the na's 
-#Na.s represented a very small proportion of the data and so were omitted
+h.protein.levels <- h.protein.levels[colSums(is.na(h.protein.levels)) == 0] # Removal of the na's
+# Na.s represented a very small proportion of the data and so were omitted
 
 # mean.protein levels contains the average response intensity of the for each piglet sample
-h.mean.protein.levels <-  as.data.frame(t(h_data[,34:49]))
+h.mean.protein.levels <- as.data.frame(t(h_data[, 34:49]))
 colnames(h.mean.protein.levels) <- UniProt.id$Protein
-sum(is.na(h.mean.protein.levels))# There are 104 proteins not measured in all pigs
+sum(is.na(h.mean.protein.levels)) # There are 104 proteins not measured in all pigs
 
 h.mean.protein.levels <- h.mean.protein.levels[colSums(is.na(h.mean.protein.levels)) == 0] # In the event that the a protein was detected in one sample but not the other. The single values is counted as the mean
 
-#cns.h.mean.protein.levels.matrix <- as.matrix(cns.mean.protein.levels)
-# Data frame protein responses per brain x = 6991 proteins y = 32 brains 
+# cns.h.mean.protein.levels.matrix <- as.matrix(cns.mean.protein.levels)
+# Data frame protein responses per brain x = 6991 proteins y = 32 brains
 
 # Clinic.values contains relevant clinical information
 clinic.values <- read_excel("data/Copy of HI+SC_Piglet_master_file.xlsx")
-clinic.values<- clinic.values%>%
-  filter(Proteomics == TRUE)%>%
-  filter(Pig != 2370)%>%
+clinic.values <- clinic.values %>%
+  filter(Proteomics == TRUE) %>%
+  filter(Pig != 2370) %>%
   mutate(Date = factor(Date))
 
 # Treatment information refers to their grouping.
 treatment.information <- tibble::rownames_to_column(h.protein.levels)
 
-treatment.information <- treatment.information%>%
-  dplyr::select(`rowname`)%>%
-  mutate(Brain = factor(`rowname`))%>%
+treatment.information <- treatment.information %>%
+  dplyr::select(`rowname`) %>%
+  mutate(Brain = factor(`rowname`)) %>%
   mutate(Treatment = ifelse(grepl("2335|2343|2351|2367|2380|2407", x = treatment.information$`rowname`), "HI+HTH+SC",
-                            ifelse(grepl("2334|2344|2350|2368|2374", x = treatment.information$`rowname`), "HI+HTH+PBS", "CONTROL")))%>%
+    ifelse(grepl("2334|2344|2350|2368|2374", x = treatment.information$`rowname`), "HI+HTH+PBS", "CONTROL")
+  )) %>%
   mutate(Treatment = factor(Treatment))
 
-#Compile the multiple data frames into a single list
+# Compile the multiple data frames into a single list
 H.Data <- list(UniProt.id, treatment.information, clinic.values, h.mean.protein.levels)
 ```
 
+```{r Wrangling to a tidy dataset,include=FALSE}
+#----------------------------------------------------------------------------------------------
+# wrangle data into tidy format and incorporate possible confounding factors
+h_data_reshape <- h_data %>% 
+  dplyr::select(Protein, contains("brain")) %>%
+  tidyr::gather(Brain, "Response", -Protein,  factor_key = TRUE)%>%
+  mutate(Protein = factor(Protein))
+
+#Generate confounding variables
+h_data_1 <- mutate(h_data_reshape, Sample = ifelse(grepl("sample 1", Brain), 1, 2))
+h_data_2 <- mutate(h_data_1, Sex = ifelse(grepl("2335|2367|2370|2407|2410", x = h_data_1$Brain), "F", "M"))
+Data_tidy <- mutate(h_data_2, Treatment = ifelse(grepl("2335|2343|2351|2370|2380|2407", x = h_data_2$Brain), "HI+HTH+SC",
+                                     ifelse(grepl("2334|2344|2350|2368|2374", x = h_data_2$Brain), "HI+HTH+PBS", "CONTROL")))%>%
+    mutate(Treatment = factor(Treatment), Sex = factor(Sex))
+```
 
 ## Data exploration
 In this section we will check for the presences of possible confounding variables using the mixomics package. 
@@ -120,25 +148,32 @@ To begin, will investigate the effect of:
 3) Hypotensive time: This is analogous to ischemia exposure.
 
 
-```{r Data qualitiy check}
-# Creation of a matrix for PCA computation 
+```{r Principal component analysis assess instrument reproducibillity}
+# Here we aim to assess the effect of our duplicate runs on the ABSIEX5600 Triple TOF.
+# The pca() function requires a matrix argument to compute so we will wrangle the h.protein.levels data frames into matrix class, center and scale them, perform PCA and plot the PCA.
+
+
+# Creation of a matrix for PCA computation
 h.protein.levels.matrix <- as.matrix(h.protein.levels)
 h.mean.protein.levels.matrix <- as.matrix(h.mean.protein.levels)
 
-#cns. is refers to data that has been centered and scaled.
+#Center and scale the data (cns. is refers to data that has been centered and scaled.).
 cns.h.protein.levels.matrix <- scale(h.protein.levels, center = TRUE)
 cns.h.mean.protein.levels.matrix <- scale(h.mean.protein.levels, center = TRUE)
 
-## Are the duplicate MSMS measurements highly correlated 
+## By plotting the PCA we can establish assess reproducibillity between duplicate runs.
 CnS.PCA <- pca(cns.h.protein.levels.matrix)
 PCA_duplicates <- plotIndiv(CnS.PCA, title = "Duplicate runs on the ABSCIEX Triple TOF are highly correlated", caption = "The replicates are highly correlated and so can be averaged")
 
 print(PCA_duplicates)
+
+# Save the figure output in the /output folder
 png("figs/Figure 1 PCA duplicates.png")
 ```
-The plots demonstrate that each of the duplicate samples are highly correlated thus, for simplicity we will take the mean. All visualizations from here on will be derived from the mean response intensity.
 
-```{r Initial data visualisation}
+The plots demonstrate that each of the duplicate samples are highly correlated thus, for simplicity we will take the mean of the two duplicates. All visualizations from here on will be derived from the mean response intensity.
+
+```{r What proteins contribute most to the variation}
 ## Initial data visualization
 Ini.pca <- pca(cns.h.mean.protein.levels.matrix)
 plotIndiv(Ini.pca)
@@ -146,38 +181,36 @@ plotVar(Ini.pca, cex = 2)
 ```
 
 
-```{r Confounding factors, fig.height= 6, fig.width=6, fig.hold='hold', out.width="50%"}
+```{r PCA to identify confounding factors, fig.height= 6, fig.width=6, fig.hold='hold', out.width="50%"}
 # Generate plots to show the effect of the confounding factor
-par(mfrow=c(1,2))
+par(mfrow = c(3, 1))
 
-Group_effect <- plotIndiv(Ini.pca, group = clinic.values$Group, legend = TRUE, title = "Group effect", legend.position = "top", cex = 5)
-Date_effect <- plotIndiv(Ini.pca, group = clinic.values$Date, legend = TRUE, title = "Date effect",  legend.position = "top", cex = 5)
-Sex_effect <- plotIndiv(Ini.pca, group = clinic.values$Sex, legend = TRUE, title = "Sex Effect",  legend.position = "top", cex = 5)
-
-print(Group_effect)
-print(Date_effect)
-print(Sex_effect)
-
-png("figs/Major sources of variation by PCA.png")
-
-#None of these factors appear to play a part in the clustering. Though Sex is debatable
+plotIndiv(Ini.pca, group = clinic.values$Group, legend = TRUE, title = "Group effect", legend.position = "top", cex = 5)
+plotIndiv(Ini.pca, group = clinic.values$Date, legend = TRUE, title = "Date effect", legend.position = "top", cex = 5)
+plotIndiv(Ini.pca, group = clinic.values$Sex, legend = TRUE, title = "Sex Effect", legend.position = "top", cex = 5)
+# None of these factors appear to play a part in the clustering. Though Sex is debatable
 ```
 
 It appears that the variables that we have selected are not major sources of variation in our dataset. 
-
 The second question like to ask is what are the key variables that contribute to the most variance in the data set.
 
+```{r What features contribute most to the variance}
+data <- cns.h.mean.protein.levels.matrix 
 
-```{r What features contribute most to the variance }
-MyResult.spca <- spca(cns.h.mean.protein.levels.matrix, ncomp = 3, keepX = c(15,15,15))                 # 1 Run the method
+# 1 Run the method
+MyResult.spca <- spca(data, ncomp = 3, keepX = c(15, 15, 15)) 
 
-tune <- tune.pca(cns.h.mean.protein.levels.matrix) # tune function is used to produce a scree plot to find the optimum number of components.
+# tune function is used to produce a scree plot to find the optimum number of components.
+tune <- tune.pca(data)
 
-screeplot(tune) ## Scree plot shows elbow at PC2  
+## Scree plot shows elbow at PC2
+screeplot(tune) 
 
-plotIndiv(MyResult.spca, group = clinic.values$Group,   # 2 Plot the samples
-          legend = TRUE, title = 'Group effects, sPCA comp 1 - 2',
-          legend.title = 'Group')
+plotIndiv(MyResult.spca,
+  group = clinic.values$Group, # 2 Plot the samples
+  legend = TRUE, title = "Group effects, sPCA comp 1 - 2",
+  legend.title = "Group"
+)
 
 plotVar(MyResult.spca, cex = 3)
 
@@ -185,7 +218,7 @@ selectVar(MyResult.spca, comp = 1)$value
 
 plotLoadings(MyResult.spca)
 
-selectVar(MyResult.spca, comp=2)$value
+selectVar(MyResult.spca, comp = 2)$value
 plotLoadings(MyResult.spca, comp = 2)
 
 # Extract and save the largest predictors from the three principal components
@@ -194,13 +227,13 @@ write.csv(MyResult.spca$loadings, "output/Principal component loadings - Human.c
 
 Given the number of duplicates we will see the implications of removing the duplicate genes and seeing what other proteins are contributing to the variance.
                
-```{r Visualisation of proteins}
+```{r Visualisation of Global protein expression}
 ## Visualization of the global comparisons using heatmaps and dendrograms
 
 # heatmap with dendrogram reordering + expected ordering
-color_vector <- c("1","2","2","1","1","2","1","2","1","2","2","3","3","3","3","3")
+color_vector <- c("1", "2", "2", "1", "1", "2", "1", "2", "1", "2", "2", "3", "3", "3", "3", "3")
 colMain <- colorRampPalette(brewer.pal(3, "Blues"))(25)
-hm <- heatmap(cns.h.mean.protein.levels.matrix, RowSideColors=color_vector)
+hm <- heatmap(data, RowSideColors = color_vector)
 
 print(hm)
 
@@ -211,41 +244,47 @@ Next we will ask the question: What specific proteins are different between the 
 
 ```{r Univariate testing for human data}
 #----------------------------------------------------------------------------------------------------------------------------------
-Group = as.factor(t(clinic.values$Group)) # groups you are comparing
+Group <- as.factor(t(clinic.values$Group)) # groups you are comparing
 
-Data <- as.matrix(h_data[,34:49])
+Data <- as.matrix(h_data[, 34:49])
 rownames(Data) <- h_data$Protein
- Data <- na.omit(Data)
+Data <- na.omit(Data)
 # we test one variable at a time, extracting the pvalues
-aovmod = apply(Data, 1, function(x) {aov(x ~ Group)})
+aovmod <- apply(Data, 1, function(x) {
+  aov(x ~ Group)
+})
 
-#extract the p-values for each ANOVA
-pvalaov = sapply(aovmod, function(x) {summary(x)[[1]][["Pr(>F)"]][1]})
+# extract the p-values for each ANOVA
+pvalaov <- sapply(aovmod, function(x) {
+  summary(x)[[1]][["Pr(>F)"]][1]
+})
 
-# Number of DE 
+# Number of DE
 sum(pvalaov <= 0.05)
 
-# Adjust for multiple testing  
-pvalaov_adj = p.adjust(pvalaov,method = 'fdr')
+# Adjust for multiple testing
+pvalaov_adj <- p.adjust(pvalaov, method = "fdr")
 sum(pvalaov_adj <= 0.05)
 
 
 #--------------------------- If you have more than two Groups ------------------------------------
 # perform posthoc Tukey test
-postTurSHD =t(lapply(aovmod, function(x){TukeyHSD(x)$'Group'[, "p adj"]}))
+postTurSHD <- t(lapply(aovmod, function(x) {
+  TukeyHSD(x)$"Group"[, "p adj"]
+}))
 
 # extract adjust p value for each pair
-postTurSHD_Table = data.frame(matrix(unlist(postTurSHD,use.names = TRUE), nrow=nrow(Data), byrow=T))
+postTurSHD_Table <- data.frame(matrix(unlist(postTurSHD, use.names = TRUE), nrow = nrow(Data), byrow = T))
 
 # set renames
-rownames(postTurSHD_Table) = names(aovmod)
+rownames(postTurSHD_Table) <- names(aovmod)
 
 # set colnames names
-colnames(postTurSHD_Table) =names(postTurSHD[[1]]) # this looks at the first variable and extracts the pairwise comparisons
+colnames(postTurSHD_Table) <- names(postTurSHD[[1]]) # this looks at the first variable and extracts the pairwise comparisons
 
-HI_HTH_PBS_CONTROL.sig <- row.names(postTurSHD_Table)[which(postTurSHD_Table$`HI+HTH+PBS-CONTROL`<=0.05)]
-HI_HTH_SC_CONTROL.sig <- row.names(postTurSHD_Table)[which(postTurSHD_Table$`HI+HTH+SC-CONTROL`<=0.05)]
-HI_HTH_SC_HI_HTH_PBS.sig <- row.names(postTurSHD_Table)[which(postTurSHD_Table$`HI+HTH+SC-HI+HTH+PBS`<=0.05)]
+HI_HTH_PBS_CONTROL.sig <- row.names(postTurSHD_Table)[which(postTurSHD_Table$`HI+HTH+PBS-CONTROL` <= 0.05)]
+HI_HTH_SC_CONTROL.sig <- row.names(postTurSHD_Table)[which(postTurSHD_Table$`HI+HTH+SC-CONTROL` <= 0.05)]
+HI_HTH_SC_HI_HTH_PBS.sig <- row.names(postTurSHD_Table)[which(postTurSHD_Table$`HI+HTH+SC-HI+HTH+PBS` <= 0.05)]
 
 print(HI_HTH_PBS_CONTROL.sig)
 print(HI_HTH_SC_CONTROL.sig)
@@ -256,29 +295,75 @@ write.csv(HI_HTH_PBS_CONTROL.sig, "output/Significantly altered proteins HI-HTH-
 write.csv(HI_HTH_SC_CONTROL.sig, "output/Significantly altered proteins HI-HTH-SC vs CONTROL.csv")
 write.csv(HI_HTH_SC_HI_HTH_PBS.sig, "output/Significantly altered proteins HI-HTH-SC vs HI-HTH-PBS.csv")
 ```
+
 ```{r Treat HI groups as the same for human data}
 #----------------------------------------------------------------------------------------------------------------------------------
-Group = as.factor(t(clinic.values$Treatment)) # groups you are comparing
+Treatment <- as.factor(t(clinic.values$Treatment)) # groups you are comparing
 
-Data <- as.matrix(h_data[,34:49])
+Data <- as.matrix(h_data[, 34:49])
 rownames(Data) <- h_data$Protein
- Data <- na.omit(Data)
+Data <- na.omit(Data)
 # we test one variable at a time, extracting the pvalues
-aov = apply(Data, 1, function(x) {aov(x ~ Group)})
+aov <- apply(Data, 1, function(x) {
+  aov(x ~ Treatment)
+})
 
-#extract the p-values for each ANOVA
-pvalaov = sapply(aovmod, function(x) {summary(x)[[1]][["Pr(>F)"]][1]})
+# extract the p-values for each ANOVA
+pvalaov <- sapply(aovmod, function(x) {
+  summary(x)[[1]][["Pr(>F)"]][1]
+})
 
-# Number of DE 
+# Number of DE
 sum(pvalaov <= 0.05)
 
-# Adjust for multiple testing  
-pvalaov_adj = p.adjust(pvalaov,method = 'fdr')
+# Adjust for multiple testing
+pvalaov_adj <- p.adjust(pvalaov, method = "fdr")
 sum(pvalaov_adj <= 0.05)
 
 write.csv(pvalaov_adj, "output/Significantly altered proteins HI vs CONTROL.csv")
 ```
 
+```{r Print significantly altered proteins from the human between HI & Control}
+data <- h.mean.protein.levels[HI_HTH_PBS_CONTROL.sig]
+
+proteins <- colnames(data)
+
+proteins <- sub("..........|*xxx", "", proteins)
+proteins <- sub("\\_.*", "",proteins)
+
+for (i in 1:length(data)){
+ plot <- ggplot(data, aes(x = Group, y = data[,i], fill = Group))+
+   geom_boxplot()+
+  geom_point()+
+   labs(y = "Response", x = "Treatment Group", title = paste(proteins[i]))+
+     theme(legend.position = "none")
+   
+  
+  print(plot)
+}
+
+```
+
+```{r Print significantly altered proteins from the human between Vehicle treated HI animals and stem cell treated HI animals }
+data <- h.mean.protein.levels[HI_HTH_SC_HI_HTH_PBS.sig]
+
+proteins <- colnames(data)
+
+proteins <- sub("..........|*xxx", "", proteins)
+proteins <- sub("\\_.*", "",proteins)
+
+for (i in 1:length(data)){
+ plot <- ggplot(data, aes(x = Group, y = data[,i], fill = Group))+
+   geom_boxplot()+
+  geom_point()+
+   labs(y = "Response", x = "Treatment Group", title = paste(proteins[i]))+
+     theme(legend.position = "none")
+   
+  
+  print(plot)
+}
+
+```
 
 ```{r Human Volcano plots}
 # Data wrangling into a format suitable for volcano plots
@@ -288,291 +373,263 @@ write.csv(pvalaov_adj, "output/Significantly altered proteins HI vs CONTROL.csv"
 ```
 
 
-```{r Human Pathway analysis with cluster profiler}
+```{r Pig Pathway analysis with cluster profiler}
 # Data wrangling into a format suitable for cluster profiler
 
-con.vs.all <- read.csv("output/HI.vs.CONTROL.csv")%>%
-separate(`X`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
-  mutate(`p-value` = `x`)
-  #filter(`p-value`<0.05)#
+con.vs.all <- read_excel("data/Control vs ALL.xlsx")%>%
+  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")
+# filter(`p-value`<0.05)#
 
 
-#prepare prot.list 
+# prepare prot.list
 ## assume that 1st column is ID
 ## 2nd column is fold change
 
 ## feature 1: numeric vector
 Prot.list <- con.vs.all %>%
-  dplyr::select(`UniProt`, `Fold Change`,`p-value`)
+  dplyr::select(`UniProt`, `Fold Change`, `p-value`)
 
-KEGGID <-  bitr_kegg(Prot.list$UniProt, fromType='uniprot', toType='kegg', organism='ssc')
+KEGGID <- bitr_kegg(Prot.list$UniProt, fromType = "uniprot", toType = "kegg", organism = "ssc")
 
-d <- merge(Prot.list, KEGGID, by = "Identifier", by.x = "UniProt",by.y = "uniprot")
+d <- merge(Prot.list, KEGGID, by = "Identifier", by.x = "UniProt", by.y = "uniprot")
 
-Prot.list <- as.matrix(d)
-
+Pig.Prot.list <- as.matrix(d)
 ```
 
-```{r Human KEGG analysis}
+```{r Human data wrangling for Cluster Profiller analysis}
 # Data wrangling into a format suitable for cluster profiler
 
-con.vs.all <- read.csv("output/HI.vs.CONTROL.csv")%>%
-separate(`X`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
-  mutate(`p-value` = `x`)
-  #filter(`p-value`<0.05)#
+##transform our data into log2 base.
+#calculate the log mean of each gene per group
+Log_means <- Data_tidy %>%
+  filter(Treatment == "CONTROL")%>%
+  mutate(Log2_Response = log2(Response)) %>%
+  dplyr::select(Protein, Treatment, Log2_Response)
+  
+  
+Control <- aggregate(Log_means[,3], list(Log_means$Protein), FUN = mean)
+
+Log_means <- Data_tidy %>%
+  filter(Treatment == "HI+HTH+PBS")%>%
+  mutate(Log2_Response = log2(Response)) %>%
+  dplyr::select(Protein, Treatment, Log2_Response)
+
+HI_HTH_PBS <- aggregate(Log_means[,3], list(Log_means$Protein), FUN = mean)
+
+Log_means <- Data_tidy %>%
+  filter(Treatment == "HI+HTH+SC")%>%
+  mutate(Log2_Response = log2(Response)) %>%
+  dplyr::select(Protein, Treatment, Log2_Response)
+
+HI_HTH_SC <- aggregate(Log_means[,3], list(Log_means$Protein), FUN = mean)
+
+#because our data is already log2 transformed, we can take the difference between the means.  And this is our log2 Fold Change or log2 Ratio == log2(control / test)
+foldchange_CONTROL.vs.HI_HTH_PBS <- Control[,2] - HI_HTH_PBS[,2]
+foldchange_CONTROL.vs.HI_HTH_SC <- Control[,2] - HI_HTH_SC[,2]
+foldchange_HI_HTH_SC.vs.HI_HTH_PBS <- HI_HTH_SC[,2] - HI_HTH_PBS[,2]
 
 
-#prepare prot.list 
+foldchange_CONTROL.vs.HI_HTH_PBS <- as.matrix(foldchange_CONTROL.vs.HI_HTH_PBS)
+foldchange_CONTROL.vs.HI_HTH_SC <- as.matrix(foldchange_CONTROL.vs.HI_HTH_SC)
+foldchange_HI_HTH_SC.vs.HI_HTH_PBS <- as.matrix(foldchange_HI_HTH_SC.vs.HI_HTH_PBS)
+
+rownames(foldchange_CONTROL.vs.HI_HTH_PBS) <- UniProt.id$Protein
+rownames(foldchange_CONTROL.vs.HI_HTH_SC) <- UniProt.id$Protein
+rownames(foldchange_HI_HTH_SC.vs.HI_HTH_PBS) <- UniProt.id$Protein
+
+foldchange_CONTROL.vs.HI_HTH_PBS <- na.omit(foldchange_CONTROL.vs.HI_HTH_PBS)
+foldchange_CONTROL.vs.HI_HTH_SC <- na.omit(foldchange_CONTROL.vs.HI_HTH_SC)
+foldchange_HI_HTH_SC.vs.HI_HTH_PBS <- na.omit(foldchange_HI_HTH_SC.vs.HI_HTH_PBS)
+
+
+con.vs.HI_HTH_PBS <- merge(postTurSHD_Table[1], foldchange_CONTROL.vs.HI_HTH_PBS, by = "row.names", all = TRUE)
+con.vs.HI_HTH_SC <- merge(postTurSHD_Table[2], foldchange_CONTROL.vs.HI_HTH_SC, by = "row.names", all = TRUE)
+HI_HTH_PBS.vsHI_HTH_SC <-  merge(postTurSHD_Table[3], foldchange_CONTROL.vs.HI_HTH_SC, by = "row.names", all = TRUE)
+
+
+# prepare prot.list
 ## assume that 1st column is ID
 ## 2nd column is fold change
 
 ## feature 1: numeric vector
-Prot.list <- con.vs.all %>%
-  dplyr::select(`UniProt`, `Fold Change`,`p-value`)
+Prot.list <- con.vs.HI_HTH_PBS %>%
+  separate(`Row.names`, into = c("sp", "UniProt", "UP"), sep = "[|]")
 
-KEGGID <-  bitr_kegg(Prot.list$UniProt, fromType='uniprot', toType='kegg', organism='ssc')
+KEGGID <- bitr_kegg(Prot.list$UniProt , fromType = "uniprot", toType = "kegg", organism = "hsa")
 
-d <- merge(Prot.list, KEGGID, by = "Identifier", by.x = "UniProt",by.y = "uniprot")
+entrez = bitr(KEGGID$uniprot, fromType="UNIPROT", toType="ENTREZID", OrgDb="org.Hs.eg.db")
 
-Prot.list <- as.matrix(d)
+d <- merge(Prot.list, KEGGID, by = "Identifier", by.x = "UniProt", by.y = "uniprot")
 
-```
-
-
-
-
-```{r Volcano plots from p-values previously collected from Marker view software, fig.height=12, fig.width=12}
-#Import the data
-Control_vs_ALL <- read_excel("data/Control vs ALL.xlsx")
-
-# Separate out the Peak Name column into the UniprotID and drop NAs
-Control_vs_ALL <- Control_vs_ALL %>%
-  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
-  drop_na()
-
-#Repeat above
-ControlvsHI_PBS <- read_excel("data/ControlvsHI+PBS.xlsx")
-ControlvsHI_PBS <- ControlvsHI_PBS %>%
-  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
-  drop_na()
-
-#Repeat above
-HI_SCvsHI_PBS <- read_excel("data/HI+SCvsHI+PBS.xlsx")
-HI_SCvsHI_PBS <- HI_SCvsHI_PBS %>%
-  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
-  drop_na()
-
-# ----------------------------------------------------------------
-# Visualize the Volcano plots using the enhanced volcano package from biconductor
-# ----------------------------------------------------------------
-  EnhancedVolcano(Control_vs_ALL,
-    lab = "UniProt",
-    x = 'Log (Fold Change)',
-    y = 'p-value',
-    xlim = c(-2, 2),
-    ylim = c(0, 2), 
-    title = "Control animals vs HI+HTH")
-
-
- EnhancedVolcano(ControlvsHI_PBS,
-    lab = "UniProt",
-    x = 'Log (Fold Change)',
-    y = 'p-value',
-    xlim = c(-2, 2),
-    ylim = c(0, 2), 
-    title = "Control animals vs HI+HTH+PBS")
-
- EnhancedVolcano(HI_SCvsHI_PBS,
-    lab = "UniProt",
-    x = 'Log (Fold Change)',
-    y = 'p-value',
-    xlim = c(-2, 2),
-    ylim = c(0, 2), 
-    title = "HI+HTH+SC vs HI+HTH+PBS")
-```
-
-In this next section we will conduct a detailed pathway analysis using the cluster profiller package to determine which pathways are up and down regulated. 
-
-```{r ClusterProfiler, include=FALSE}
-#Import the files containing pvalues
-## Data wrangling to obtain th KEGG identifiers
-Control_vs_ALL <- read_excel("data/Control vs ALL.xlsx")
-
-con.vs.all <- Control_vs_ALL %>%
-  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
-  filter(`p-value`<0.05)
-
-#str(con.vs.all)#write(con.vs.all$UniProt, "Con_vs_all_uniprot.csv")
-
-#ControlvsHI_PBS <- read_excel("ControlvsHI+PBS.xlsx")
-#con.vs.pbs <- ControlvsHI_PBS%>%
-#  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
- # filter(`p-value`<0.05)
-
-#HI_SCvsHI_PBS <- read_excel("HI+SCvsHI+PBS.xlsx")
-#hi.vs.pbs <- HI_SCvsHI_PBS%>%
-  #separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
-  #filter(`p-value`<0.05)
-
-#UniProt <- Control_vs_ALL%>%
-#separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
- # dplyr::select(UniProt)
-
-#_________________________________________
-
-#prepare prot.list 
-## assume that 1st column is ID
-## 2nd column is fold change
-
-## feature 1: numeric vector
-Prot.list <- con.vs.all %>%
-  dplyr::select(`UniProt`, `Fold Change`,`p-value`)
-
-KEGGID <-  bitr_kegg(Prot.list$UniProt, fromType='uniprot', toType='kegg', organism='ssc')
-
-d <- merge(Prot.list, KEGGID, by = "Identifier", by.x = "UniProt",by.y = "uniprot")
+d <- d %>%
+  mutate(`Fold Change` = `V1`, `p-value`= `HI+HTH+PBS-CONTROL`)%>%
+  dplyr::select(kegg, `Fold Change`, `p-value`)
 
 Prot.list <- as.matrix(d)
 
-#Prot.list <- as.matrix(Prot.list[,2])
+Prot.list <- as.matrix(Prot.list[,2])
 ## feature 2: named vector
-#rownames(Prot.list) <- as.character(d[,1])
+rownames(Prot.list) <- as.character(d[,1])
 
 ## feature 3: decreasing order
-#Prot.list <- sort(Prot.list, decreasing = TRUE)
+Prot.list <- sort(Prot.list, decreasing = TRUE)
 ```
 
 
-
-```{r Pathway analysis section }
-#=================================================================================================
+```{r Human Pathway analysis section }
+# =================================================================================================
 ## Pathway analysis data preparation
 # This contains the KEGG ids
-geneList <- d[,2]
-names(geneList) <- as.character(d[,4])
+geneList <- d[, 2]
+names(geneList) <- as.character(d[, 1])
 geneList <- sort(geneList, decreasing = TRUE)
 
 gene <- names(geneList)[abs(geneList) > 1.1]
- 
 ```
 
-```{r KEGG Enrichment}
-#==================================================================================================
-# KEGG enrichment analysis
-KEGG.enrichment <- enrichKEGG(gene = gene,
-                keyType = "kegg",
-                 organism  = 'ssc',
-                 pvalueCutoff = 0.1)
 
-barplot(KEGG.enrichment, showCategory=20)
-dotplot(KEGG.enrichment, showCategory=20)
+```{r Human KEGG Enrichment}
+# ==================================================================================================
+# KEGG enrichment analysis
+KEGG.enrichment <- enrichKEGG(
+  gene = gene,
+  keyType = "kegg",
+  organism = "hsa",
+  pvalueCutoff = 0.05
+)
+
+barplot(KEGG.enrichment, showCategory = 20)
+dotplot(KEGG.enrichment, showCategory = 20)
+cnetplot(KEGG.enrichment)
+emapplot(KEGG.enrichment)
+
 
 ## convert gene ID to Symbol
 
-gse <- gseKEGG(geneList     = geneList,
-                keyType = "kegg",
-               organism     = 'ssc',
-               nPerm        = 1000,
-               minGSSize    = 5,
-               pvalueCutoff = 0.2,
-               verbose      = FALSE)
+gse <- gseKEGG(
+  geneList = geneList,
+  keyType = "kegg",
+  organism = "hsa",
+  minGSSize = 5,
+  pvalueCutoff = 0.05,
+  verbose = FALSE
+)
 
 head(gse)
 
-enrich.mod <- enrichMKEGG(gene = gene,
-                keyType = "kegg",
-                 organism  = 'ssc',
-                 pvalueCutoff = 0.1)
-
-gse.mod<-  gseMKEGG(gene = geneList,
-                keyType = "kegg",
-                 organism  = 'ssc',
-                 pvalueCutoff = 0.5)
+dotplot(gse, showCategory = 20)
+cnetplot(gse,node_lable = "all")
+emapplot(gse)
+gseaplot(gse, geneSetID = 1)
 
 
+enrich.mod <- enrichMKEGG(
+  gene = gene,
+  keyType = "kegg",
+  organism = "hsa",
+  pvalueCutoff = 0.05
+)
 
+barplot(enrich.mod, showCategory = 20)
+dotplot(enrich.mod, showCategory = 20)
+cnetplot(enrich.mod, node_lable = "all")
+
+
+# Reactome Pathway Analysis
+RPA <- enrichPathway(
+  gene = gene,
+  pvalueCutoff = 0.05)
+
+emapplot(RPA, node_label  = "all")
+emapplot(RPA, node_label  = "gene")
+
+gseRPA <- gsePathway(geneList = geneList,
+  minGSSize = 5,
+  pvalueCutoff = 0.05)
+
+cnetplot(gseRPA, node_label = "all")
 ```
-```{r wikipathway analysis}
-## Will not undertake wiki pathway analysis for because the sus scrofa data base is very small(161 bytes)
 
+```{r Human Gene Ontology Analysis}
+Prot.list <- con.vs.HI_HTH_PBS %>%
+  separate(`Row.names`, into = c("sp", "UniProt", "UP"), sep = "[|]")
 
+entrez = bitr(KEGGID$uniprot, fromType="UNIPROT", toType="ENTREZID", OrgDb="org.Hs.eg.db")
 
+d <- merge(Prot.list, entrez, by.x = "UniProt", by.y = "UNIPROT")
 
-edox <- setReadable(edo, 'org.Ss.eg.db', 'ENTREZID')
-p1 <- cnetplot(edox, foldChange=geneList)
-## categorySize can be scaled by 'pvalue' or 'geneNum'
-p2 <- cnetplot(edox, categorySize="pvalue", foldChange=geneList)
-p3 <- cnetplot(edox, foldChange=geneList, circular = TRUE, colorEdge = TRUE)
-cowplot::plot_grid(p1, p2, p3, ncol=3, labels=LETTERS[1:3], rel_widths=c(.8, .8, 1.2))
+d <- d %>%
+  mutate(`Fold Change` = `V1`, `p-value`= `HI+HTH+PBS-CONTROL`)%>%
+  dplyr::select(ENTREZID, `Fold Change`, `p-value`)
 
+Prot.list <- as.matrix(d)
 
+Prot.list <- as.matrix(Prot.list[,2])
+## feature 2: named vector
+rownames(Prot.list) <- as.character(d[,1])
 
-```
-```{r GO analysis}
-## Will not undertake wiki pathway analysis for because the sus scrofa data base is very small(161 bytes)
+## feature 3: decreasing order
+Prot.list <- sort(Prot.list, decreasing = TRUE)
 
-sample_test <- enrichGO(gene = gene, OrgDb = 'org.Ss.eg.db' , pvalueCutoff=1, qvalueCutoff=1)
-head(summary(sample_test))
+geneList <- d[, 2]
+names(geneList) <- as.character(d[, 1])
+geneList <- sort(geneList, decreasing = TRUE)
 
+gene <- names(geneList)[abs(geneList) > 1.1]
+
+gene.df <- bitr(gene, fromType = "ENTREZID", toType = c("ENSEMBL", "SYMBOL"), OrgDb = org.Hs.eg.db)
+
+ggo <- groupGO(gene     = gene,
+               OrgDb    = org.Hs.eg.db,
+               ont      = "CC",
+               level    = 3,
+               readable = TRUE)
+
+head(ggo)
 
 ego <- enrichGO(gene          = gene,
                 universe      = names(geneList),
-                OrgDb         = org.Ss.eg.db,
-                ont           = "CC",
+                OrgDb         = org.Hs.eg.db,
+                ont           = "ALL",
                 pAdjustMethod = "BH",
                 pvalueCutoff  = 0.01,
-                qvalueCutoff  = 0.05)
-head(summary(ego))
+                qvalueCutoff  = 0.05,
+        readable      = TRUE)
+head(ego)
 
 
-dotplot(ego, showCategory=10)
-
-enrichMap(ego, vertex.label.cex=1.2, layout=igraph::layout.kamada.kawai)
-cnetplot(ego, foldChange= geneList)
-
-plotGOgraph(ego)
-
-
-secc <- gseGO(geneList=geneList, ont="CC", OrgDb=org.Ss.eg.db, verbose=F)
-head(summary(gsecc))
-
-gseaplot(gsecc, geneSetID="GO:0000779")
 ```
 
-```{r}
-#======================================================================================================
-#Disease enrichment analysis
-
-pig = useMart("ensembl", dataset = "sscrofa_gene_ensembl")
-
-BM_Annotations <- getBM(mart= pig, values= rownames(cns.h.mean.protein.levels.matrix), attributes= c("description","uniprot_gn_id","entrezgene_id","protein_id"))
-
-
-entrez <- merge(BM_Annotations, Prot.list, by = "Identifier", by.x = "uniprot_gn_id",by.y = "UniProt")
-
-entrez <- distinct(entrez)
-
-# Prepare the data for Disease ontology analysis
-geneList <- as.numeric(entrez[,5])
-names(geneList) <- as.character(entrez[,3])
-geneList <- sort(geneList, decreasing = TRUE)                                
-
-gene<- names(geneList)
-# Must be entrez IDs !!!!!!!!!!!!!!1
-x <- enrichDO(gene          = geneList,
+```{r Human Disease Analysis}
+# The output of the following compares between the Control and the HI+HTH+PBS group 
+DO <-  enrichDO(gene          = gene,
               ont           = "DO",
               pvalueCutoff  = 0.2,
               pAdjustMethod = "BH",
               universe      = names(geneList),
-              minGSSize     = 1,
+              minGSSize     = 5,
               maxGSSize     = 500,
               qvalueCutoff  = 0.1,
               readable      = TRUE)
 
-```
+
+barplot(DO, showCategory = 20)
+dotplot(DO, showCategory = 20)
+
+gene2 <- names(geneList)[abs(geneList) < 3]
+
+ncg <- enrichNCG(gene2)
+
+head(ncg)
+
 dgn <- enrichDGN(gene)
 
-head(x)
+head(dgn)
+
+barplot(dgn, showCategory = 20)
+dotplot(dgn, showCategory = 20)
+
+
 
 y <- gseDO(geneList,
            nPerm         = 100,
@@ -581,6 +638,17 @@ y <- gseDO(geneList,
            pAdjustMethod = "BH",
            verbose       = FALSE)
 head(y, 3)
+
+
+ncg <- gseNCG(geneList,
+              nPerm         = 100,
+              minGSSize     = 120,
+              pvalueCutoff  = 0.2,
+              pAdjustMethod = "BH",
+              verbose       = FALSE)
+ncg <- setReadable(ncg, 'org.Hs.eg.db')
+head(ncg, 3)
+
 
 dgn <- gseDGN(geneList,
               nPerm         = 100,
@@ -591,133 +659,196 @@ dgn <- gseDGN(geneList,
 dgn <- setReadable(dgn, 'org.Hs.eg.db')
 head(dgn, 3)
 
-
-#======================================================================================================
-#Gene Ontology analysis
-GO.data <- bitr_kegg(Prot.list, fromType = "uniprot", toType = "kegg", organism = "ssc")
-
-gene <- Prot.list[,1]
-
-ggo <- groupGO(gene     = gene,
-               keyType = "UNIPROT",
-               OrgDb    = org.Ss.eg.db,
-               ont      = "CC",
-               level    = 3,
-               readable = TRUE)
-
-gene.Go <- Prot.list[,1]
-
-ego <- enrichGO(gene          = gene.Go,
-                universe      = con.vs.all$UniProt,
-                keyType = "UNIPROT",
-                OrgDb         = org.Ss.eg.db,
-                ont           = "CC",
-                pAdjustMethod = "BH",
-                pvalueCutoff  = 0.01,
-                qvalueCutoff  = 0.05,
-        readable      = TRUE)
-#======================================================================================================
-# Reactome Pathway analysis - not supported for the pig
-
-
-```{r MSigDb analysis}
-# This contains the KEGG ids
-geneList <- d[,2]
-names(geneList) <- as.character(d[,4])
-geneList <- sort(geneList, decreasing = TRUE)
-
-gene <- names(geneList)[abs(geneList) > 1.1]
-
-
-
-gmtfile <- system.file("extdata", "c5.cc.v5.0.entrez.gmt", package="clusterProfiler")
-c5 <- read.gmt(gmtfile)
-
-egmt <- enricher(gene = gene, TERM2GENE = c5,  gene,
-  pvalueCutoff = 0.05,
-  pAdjustMethod = "BH",
-  minGSSize = 10,
-  maxGSSize = 500,
-  qvalueCutoff = 0.2,
-  TERM2GENE,
-  TERM2NAME = NA)
-head(egmt)
-
-```
-
-```{r Data visualisation}
-
-#p1 <- cnetplot(edox, foldChange=geneList)
-## categorySize can be scaled by 'pvalue' or 'geneNum'
-#p2 <- cnetplot(edox, categorySize="pvalue", foldChange=geneList)
-#p3 <- cnetplot(edox, foldChange=geneList, circular = TRUE, colorEdge = TRUE)
-#cowplot::plot_grid(p1, p2, p3, ncol=3, labels=LETTERS[1:3], rel_widths=c(.8, .8, 1.2))
-
-
-#p1 <- heatplot(edox)
-#p2 <- heatplot(edox, foldChange=geneList)
-#cowplot::plot_grid(p1, p2, ncol=1, labels=LETTERS[1:2])
-
-
-#p <- pmcplot(terms, 2010:2017)
-#p2 <- pmcplot(terms, 2010:2017, proportion=FALSE)
-#plot_grid(p, p2, ncol=2)
-
-browseKEGG(KEGG.enrichment, 'ssc05012') # INput KEGG pathway number to bring up an annotated pathway to view
 ```
 
 
+```{r Biological Theme Comparison}
+
+mydf <- data.frame(Entrez=names(geneList), FC=geneList)
+mydf <- mydf[abs(mydf$FC) > 1,]
+mydf$group <- "upregulated"
+mydf$group[mydf$FC < 0] <- "downregulated"
+mydf$othergroup <- "A"
+mydf$othergroup[abs(mydf$FC) > 2] <- "B"
+
+formula_res <- compareCluster(Entrez~group+othergroup, data=mydf, fun="enrichKEGG")
+formula_res <- compareCluster(Entrez~group+othergroup, data=mydf, fun="enrichPathway")
+
+dotplot(formula_res)
+dotplot(formula_res, x=~group) + ggplot2::facet_grid(~othergroup)
 
 
-```{r Volcano plots from p-values previously collected from Marker view software, fig.height=3, fig.width=3}
-#Import the data
-Control_vs_ALL <- read_excel("Control vs ALL.xlsx")
+```
+
+
+```{r Volcano plots from p-values previously collected from Marker view software, fig.height=12, fig.width=12}
+# Import the data
+Control_vs_ALL <- read_excel("data/Control vs ALL.xlsx")
 
 # Separate out the Peak Name column into the UniprotID and drop NAs
 Control_vs_ALL <- Control_vs_ALL %>%
-  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
+  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]") %>%
   drop_na()
 
-#Repeat above
-ControlvsHI_PBS <- read_excel("ControlvsHI+PBS.xlsx")
+# Repeat above
+ControlvsHI_PBS <- read_excel("data/ControlvsHI+PBS.xlsx")
 ControlvsHI_PBS <- ControlvsHI_PBS %>%
-  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
+  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]") %>%
   drop_na()
 
-#Repeat above
-HI_SCvsHI_PBS <- read_excel("HI+SCvsHI+PBS.xlsx")
+# Repeat above
+HI_SCvsHI_PBS <- read_excel("data/HI+SCvsHI+PBS.xlsx")
 HI_SCvsHI_PBS <- HI_SCvsHI_PBS %>%
-  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
+  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]") %>%
   drop_na()
 
 # ----------------------------------------------------------------
 # Visualize the Volcano plots using the enhanced volcano package from biconductor
 # ----------------------------------------------------------------
-  EnhancedVolcano(Control_vs_ALL,
-    lab = "UniProt",
-    x = 'Log (Fold Change)',
-    y = 'p-value',
-    xlim = c(-2, 2),
-    ylim = c(0, 2), 
-    title = "Control animals vs HI+HTH")
+EnhancedVolcano(Control_vs_ALL,
+  lab = "UniProt",
+  x = "Log (Fold Change)",
+  y = "p-value",
+  xlim = c(-2, 2),
+  ylim = c(0, 2),
+  title = "Control animals vs HI+HTH"
+)
 
 
- EnhancedVolcano(ControlvsHI_PBS,
-    lab = "UniProt",
-    x = 'Log (Fold Change)',
-    y = 'p-value',
-    xlim = c(-2, 2),
-    ylim = c(0, 2), 
-    title = "Control animals vs HI+HTH+PBS")
+EnhancedVolcano(ControlvsHI_PBS,
+  lab = "UniProt",
+  x = "Log (Fold Change)",
+  y = "p-value",
+  xlim = c(-2, 2),
+  ylim = c(0, 2),
+  title = "Control animals vs HI+HTH+PBS"
+)
 
- EnhancedVolcano(HI_SCvsHI_PBS,
-    lab = "UniProt",
-    x = 'Log (Fold Change)',
-    y = 'p-value',
-    xlim = c(-2, 2),
-    ylim = c(0, 2), 
-    title = "HI+HTH+SC vs HI+HTH+PBS")
+EnhancedVolcano(HI_SCvsHI_PBS,
+  lab = "UniProt",
+  x = "Log (Fold Change)",
+  y = "p-value",
+  xlim = c(-2, 2),
+  ylim = c(0, 2),
+  title = "HI+HTH+SC vs HI+HTH+PBS"
+)
 ```
+
+In this next section we will conduct a detailed pathway analysis using the cluster profiller package to determine which pathways are up and down regulated. 
+
+```{r ClusterProfiler, include=FALSE}
+# Import the files containing pvalues
+## Data wrangling to obtain th KEGG identifiers
+Control_vs_ALL <- read_excel("data/Control vs ALL.xlsx")
+
+con.vs.all <- Control_vs_ALL %>%
+  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]") %>%
+  filter(`p-value` < 0.05)
+
+# str(con.vs.all)#write(con.vs.all$UniProt, "Con_vs_all_uniprot.csv")
+
+# ControlvsHI_PBS <- read_excel("ControlvsHI+PBS.xlsx")
+# con.vs.pbs <- ControlvsHI_PBS%>%
+#  separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
+# filter(`p-value`<0.05)
+
+# HI_SCvsHI_PBS <- read_excel("HI+SCvsHI+PBS.xlsx")
+# hi.vs.pbs <- HI_SCvsHI_PBS%>%
+# separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
+# filter(`p-value`<0.05)
+
+# UniProt <- Control_vs_ALL%>%
+# separate(`Peak Name`, into = c("sp", "UniProt", "UP"), sep = "[|]")%>%
+# dplyr::select(UniProt)
+
+# _________________________________________
+
+# prepare prot.list
+## assume that 1st column is ID
+## 2nd column is fold change
+
+## feature 1: numeric vector
+Prot.list <- con.vs.all %>%
+  dplyr::select(`UniProt`, `Fold Change`, `p-value`)
+
+KEGGID <- bitr_kegg(Prot.list$UniProt, fromType = "uniprot", toType = "kegg", organism = "ssc")
+
+d <- merge(Prot.list, KEGGID, by = "Identifier", by.x = "UniProt", by.y = "uniprot")
+
+Prot.list <- as.matrix(d)
+
+# Prot.list <- as.matrix(Prot.list[,2])
+## feature 2: named vector
+# rownames(Prot.list) <- as.character(d[,1])
+
+## feature 3: decreasing order
+# Prot.list <- sort(Prot.list, decreasing = TRUE)
+```
+
+
+
+```{r Pathway analysis section }
+# =================================================================================================
+## Pathway analysis data preparation
+# This contains the KEGG ids
+geneList <- d[, 2]
+names(geneList) <- as.character(d[, 4])
+geneList <- sort(geneList, decreasing = TRUE)
+
+gene <- names(geneList)[abs(geneList) > 1.1]
+```
+
+```{r KEGG Enrichment}
+# ==================================================================================================
+# KEGG enrichment analysis
+KEGG.enrichment <- enrichKEGG(
+  gene = gene,
+  keyType = "kegg",
+  organism = "ssc",
+  pvalueCutoff = 0.1
+)
+
+barplot(KEGG.enrichment, showCategory = 20)
+dotplot(KEGG.enrichment, showCategory = 20)
+
+## convert gene ID to Symbol
+
+gse <- gseKEGG(
+  geneList = geneList,
+  keyType = "kegg",
+  organism = "ssc",
+  minGSSize = 5,
+  pvalueCutoff = 0.05,
+  verbose = FALSE
+)
+
+head(gse)
+
+enrich.mod <- enrichMKEGG(
+  gene = gene,
+  keyType = "kegg",
+  organism = "ssc",
+  pvalueCutoff = 0.2
+)
+
+barplot(enrich.mod)
+
+gse.mod <- gseMKEGG(
+  gene = geneList,
+  keyType = "kegg",
+  organism = "ssc",
+  pvalueCutoff = 0.5
+)
+```
+
+```{ Mesh enrichment analysis}
+de <- names(geneList)[1:100]
+
+x <- enrichMeSH(de, MeSHDb = "MeSH.Ssc.eg.db", database = "gendoo", category = "C")
+
+dotplot(x)
+```
+
 
 ```{r Session Info}
 sessionInfo()
